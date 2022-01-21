@@ -12,7 +12,7 @@ import (
 )
 
 //Адрес и порт сервера
-var tcpServer = "ipAddress:port"
+var tcpServer = "192.168.1.2:8082"
 
 //Структура клиента
 type clientData struct {
@@ -119,6 +119,7 @@ func (cl *clientData) newId(id string) error {
 		return errors.New("createId2")
 	}
 	cl.Id = id
+	fmt.Println("New Id: ", id)
 	return nil
 }
 
@@ -202,7 +203,6 @@ func worker(cl *clientData) error {
 				return err
 			}
 		default:
-			fmt.Printf("%#v \n", q)
 			return errors.New("something wrong")
 		}
 	}
