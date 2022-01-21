@@ -12,7 +12,7 @@ import (
 )
 
 //Адрес и порт сервера
-var tcpServer = "192.168.1.2:8082"
+var tcpServer = "ipAddress:port"
 
 //Структура клиента
 type clientData struct {
