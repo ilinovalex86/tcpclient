@@ -6,6 +6,8 @@ import (
 	"fmt"
 	cn "github.com/ilinovalex86/connection"
 	ex "github.com/ilinovalex86/explorer"
+	"github.com/ilinovalex86/screenshot"
+	"image/png"
 	"net"
 	"os"
 	"time"
@@ -13,6 +15,7 @@ import (
 
 //Адрес и порт сервера
 var tcpServer = "ipAddress:port"
+var streamServer = "ipAddress:port"
 
 //Структура клиента
 type clientData struct {
@@ -29,6 +32,13 @@ var stopErrors = []string{
 	"createId1",
 	"createId2",
 	"already exist",
+}
+
+type imgByte []byte
+
+func (ib *imgByte) Write(b []byte) (int, error) {
+	*ib = append(*ib, b...)
+	return len(b), nil
 }
 
 //Проверяет на критическую ошибку
@@ -64,7 +74,7 @@ func newClient() *clientData {
 
 //Обрабатывает подключение к серверу и передает данные о клиенте.
 func (cl *clientData) connect() error {
-	if !cl.validOnServer() {
+	if !cl.validOnServer(cl.conn) {
 		return errors.New("error valid")
 	}
 	jsonData, err := json.Marshal(cl)
@@ -72,7 +82,7 @@ func (cl *clientData) connect() error {
 	if err != nil {
 		return err
 	}
-	q, err := cn.ReadQRStruct(cl.conn)
+	q, err := cn.ReadQuery(cl.conn)
 	if err != nil {
 		return err
 	}
@@ -91,16 +101,16 @@ func (cl *clientData) connect() error {
 }
 
 //Проходит проверку на подключение к серверу
-func (cl *clientData) validOnServer() bool {
-	s, err := cn.ReadString(cl.conn)
+func (cl *clientData) validOnServer(conn net.Conn) bool {
+	s, err := cn.ReadString(conn)
 	if err != nil {
 		return false
 	}
-	err = cn.SendString(s[len(s)/2:]+s[:len(s)/2], cl.conn)
+	err = cn.SendString(s[len(s)/2:]+s[:len(s)/2], conn)
 	if err != nil {
 		return false
 	}
-	mes, err := cn.ReadString(cl.conn)
+	mes, err := cn.ReadString(conn)
 	if err != nil || mes != "ok" {
 		return false
 	}
@@ -135,19 +145,19 @@ func (cl *clientData) dir(path string) error {
 		if err != nil {
 			return err
 		}
-		jS := cn.QueryResponse{DataLen: len(data)}
-		err = cn.SendQRStruct(jS, cl.conn)
+		jS := cn.Response{DataLen: len(data)}
+		err = cn.SendResponse(jS, cl.conn)
 		if err != nil {
 			return err
 		}
-		time.Sleep(time.Millisecond)
+		cn.ReadSync(cl.conn)
 		err = cn.SendBytes(data, cl.conn)
 		if err != nil {
 			return err
 		}
 	} else {
-		jS := cn.QueryResponse{Err: errors.New(path + " is not exist")}
-		err := cn.SendQRStruct(jS, cl.conn)
+		jS := cn.Response{Err: path + " is not exist"}
+		err := cn.SendResponse(jS, cl.conn)
 		if err != nil {
 			return err
 		}
@@ -159,19 +169,19 @@ func (cl *clientData) dir(path string) error {
 func (cl *clientData) file(path string) error {
 	if ex.ExistFile(path) {
 		file, _ := os.Stat(path)
-		jS := cn.QueryResponse{DataLen: int(file.Size()), FileName: file.Name()}
-		err := cn.SendQRStruct(jS, cl.conn)
+		jS := cn.Response{DataLen: int(file.Size()), Response: file.Name()}
+		err := cn.SendResponse(jS, cl.conn)
 		if err != nil {
 			return err
 		}
-		time.Sleep(time.Millisecond)
+		cn.ReadSync(cl.conn)
 		err = cn.SendFile(path, cl.conn)
 		if err != nil {
 			return err
 		}
 	} else {
-		jS := cn.QueryResponse{Err: errors.New(path + " is not exist")}
-		err := cn.SendQRStruct(jS, cl.conn)
+		jS := cn.Response{Err: path + " is not exist"}
+		err := cn.SendResponse(jS, cl.conn)
 		if err != nil {
 			return err
 		}
@@ -179,16 +189,68 @@ func (cl *clientData) file(path string) error {
 	return nil
 }
 
+//Обрабатывает запрос на отправку файла
+func (cl *clientData) stream(c chan string) {
+	streamConn, err := net.Dial("tcp", streamServer)
+	if err != nil {
+		c <- "streamServer not found"
+		return
+	}
+	defer streamConn.Close()
+	if !cl.validOnServer(streamConn) {
+		c <- "error valid stream server"
+		return
+	}
+	jsonData, err := json.Marshal(cl)
+	err = cn.SendBytesWithDelim(jsonData, streamConn)
+	if err != nil {
+		c <- fmt.Sprint(err)
+		return
+	}
+	con, err := screenshot.Connect()
+	if err != nil {
+		c <- fmt.Sprint(err)
+		return
+	}
+	defer screenshot.Close(con)
+	c <- "ok"
+	for {
+		cn.ReadSync(streamConn)
+		img, err := screenshot.CaptureScreen(con)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		ib := &imgByte{}
+		err = png.Encode(ib, img)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		err = cn.SendResponse(cn.Response{DataLen: len(*ib)}, streamConn)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		cn.ReadSync(streamConn)
+		err = cn.SendBytes(*ib, streamConn)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+	}
+}
+
 //Принимает сообщения от сервера и обрабатывает их.
 func worker(cl *clientData) error {
 	for {
-		q, err := cn.ReadQRStruct(cl.conn)
+		q, err := cn.ReadQuery(cl.conn)
 		if err != nil {
 			return err
 		}
 		switch q.Method {
 		case "testConnect":
-			err = cn.SendQRStruct(cn.QueryResponse{}, cl.conn)
+			err = cn.SendResponse(cn.Response{}, cl.conn)
 			if err != nil {
 				return err
 			}
@@ -199,6 +261,18 @@ func worker(cl *clientData) error {
 			}
 		case "file":
 			err = cl.file(q.Query)
+			if err != nil {
+				return err
+			}
+		case "stream":
+			channel := make(chan string)
+			go cl.stream(channel)
+			r := <-channel
+			if r == "ok" {
+				err = cn.SendResponse(cn.Response{Response: r}, cl.conn)
+			} else {
+				err = cn.SendResponse(cn.Response{Err: r}, cl.conn)
+			}
 			if err != nil {
 				return err
 			}
